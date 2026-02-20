@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>GTA Map</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+<style>
+*{box-sizing:border-box;font-family:system-ui}
+body{margin:0;background:#0e0f12;color:#fff}
+#map{width:100%;height:100vh;background-color: #133e69f2;}
+
+.context-menu{
+  position:absolute;
+  background:#161a22;
+  border:1px solid #2b2f3a;
+  border-radius:10px;
+  padding:8px 12px;
+  cursor:pointer;
+  z-index:1000;
+}
+
+.modal{
+  position:fixed;
+  inset:0;
+  background:rgba(0,0,0,.6);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  z-index:2000;
+}
+
+.hidden{display:none}
+
+.card{
+  width:380px;
+  background:#12141a;
+  border:1px solid #2b2f3a;
+  border-radius:14px;
+  padding:14px;
+}
+
+input,select{
+  width:100%;
+  padding:8px;
+  margin:6px 0;
+  background:#0e1016;
+  border:1px solid #2b2f3a;
+  color:#fff;
+  border-radius:8px;
+}
+
+button{
+  padding:8px 12px;
+  border-radius:8px;
+  border:1px solid #2b2f3a;
+  background:#2a5cff;
+  color:#fff;
+  cursor:pointer;
+}
+
+.icon-option{
+  display:flex;
+  align-items:center;
+  gap:6px;
+}
+
+/* ===== Popup Moderno (Leaflet) ===== */
+.leaflet-popup-content-wrapper{
+  background:#12141a !important;
+  color:#fff !important;
+  border:1px solid #2b2f3a !important;
+  border-radius:14px !important;
+  box-shadow:0 14px 40px rgba(0,0,0,.55) !important;
+}
+
+.leaflet-popup-content{
+  margin:12px 12px !important;
+  min-width:220px;
+  font-size:13px;
+  line-height:1.25rem;
+}
+
+.leaflet-popup-tip{
+  background:#12141a !important;
+  border:1px solid #2b2f3a !important;
+}
+
+.leaflet-container a.leaflet-popup-close-button{
+  color:#fff !important;
+  opacity:.75;
+  margin-top:2px;
+}
+.leaflet-container a.leaflet-popup-close-button:hover{
+  opacity:1;
+}
+
+/* Conteúdo do popup */
+.p-title{
+  font-weight:800;
+  font-size:14px;
+  margin-bottom:4px;
+}
+.p-desc{
+  opacity:.85;
+  margin-bottom:8px;
+}
+.p-img{
+  width:100%;
+  max-width:280px;
+  border-radius:12px;
+  border:1px solid #232634;
+  display:block;
+  margin-top:8px;
+  cursor:pointer;
+}
+
+</style>
+</head>
+<body>
+<div style="position:absolute;left:0;top:0;height:100%;width:200px;background:#111;z-index:500;overflow:auto;">
+  <div style="padding:10px;font-weight:bold;border-bottom:1px solid #222;">
+    📍 Blips
+  </div>
+  <div id="sidebarList"></div>
+</div>
+
+<div id="map" style="margin-left:200px;"></div>
+
+<!-- MENU DIREITO -->
+<div id="contextMenu" class="context-menu hidden">
+  ➕ Adicionar CDS
+</div>
+
+<!-- SENHA -->
+<div id="passwordModal" class="modal hidden">
+  <div class="card">
+    <b>Digite a senha</b>
+    <input type="password" id="passwordInput"/>
+    <button onclick="checkPassword()">Entrar</button>
+    <div id="passMsg"></div>
+  </div>
+</div>
+  <!-- MODAL IMAGEM -->
+<div id="imageModal" class="modal hidden">
+  <div class="card" style="width:auto;max-width:90vw;background:transparent;border:none;">
+    <img id="modalImage" style="max-width:90vw;max-height:90vh;border-radius:12px;">
+  </div>
+</div>
+
+<!-- PAINEL -->
+<div id="panelModal" class="modal hidden">
+  <div class="card">
+    <b>Adicionar Local</b>
+
+    <input id="name" placeholder="Nome do local"/>
+    <input id="desc" placeholder="Descrição"/>
+    <input id="photo" placeholder="URL da foto"/>
+
+    <select id="icon">
+      <option value="red">🔴</option>
+      <option value="blue">🔵</option>
+      <option value="green">🟢</option>
+      <option value="yellow">🟡</option>
+      <option value="pink">🌸</option>
+      <option value="black">⚫</option>
+      <option value="white">⚪</option>
+    </select>
+
+
+
+    <div style="margin-top:8px;">
+      <small>CDS:</small>
+      <div id="coordsPreview"></div>
+    </div>
+
+    <div style="margin-top:10px;display:flex;gap:6px;">
+      <button onclick="saveMarker()">Salvar</button>
+      <button onclick="closePanel()" style="background:#444;">Cancelar</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const PASSWORD = "1234";
+const STORAGE_KEY = "gta_markers";
+
+let currentCoords = null;
+let editingId = null;
+
+const map = L.map("map",{crs:L.CRS.Simple,minZoom:-2});
+const bounds=[[0,0],[2048,2048]];
+L.imageOverlay("map.png",bounds).addTo(map);
+map.fitBounds(bounds);
+
+let markers = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+
+const iconList = {
+  red: "Vermelho",
+  blue: "Azul",
+  green: "Verde",
+  yellow: "Amarelo",
+  pink: "Rosa",
+  black: "Preto",
+  white: "Branco",
+};
+
+
+function getIcon(type){
+  return L.icon({
+    iconUrl: `icons/${type}.png`,
+    iconSize: [32, 32],
+    iconAnchor: [16, 32],
+    popupAnchor: [0, -30]
+  });
+}
+
+
+
+function saveStorage(){
+  localStorage.setItem(STORAGE_KEY,JSON.stringify(markers));
+}
+
+function renderSidebar(){
+  const sidebar=document.getElementById("sidebarList");
+  sidebar.innerHTML="";
+
+  markers.forEach(m=>{
+    const div=document.createElement("div");
+
+    div.style.padding="8px";
+    div.style.cursor="pointer";
+    div.style.display="flex";
+    div.style.alignItems="center";
+    div.style.gap="8px";
+
+    div.innerHTML=`
+      <img 
+        src="icons/${m.icon}.png" 
+        style="width:18px;height:18px;"
+      >
+      <span>${m.name}</span>
+    `;
+
+    div.onclick=()=>{
+      map.setView([m.x,m.y],0);
+    };
+
+    sidebar.appendChild(div);
+  });
+}
+
+
+function renderMarkers(){
+  map.eachLayer(layer=>{
+    if(layer instanceof L.Marker) map.removeLayer(layer);
+  });
+
+  markers.forEach(m=>{
+    const marker=L.marker([m.x,m.y],{icon:getIcon(m.icon)}).addTo(map);
+
+    marker.bindTooltip(m.name, {
+      direction: "top",
+      offset: [0, -10],
+      opacity: 0.9
+    });
+
+    marker.bindPopup(`
+      <div class="p-title">${m.name}</div>
+      ${m.desc ? `<div class="p-desc">${m.desc}</div>` : ""}
+      ${
+        m.photo
+          ? `<img
+              class="p-img"
+              src="${m.photo}"
+              onclick="openImage('${m.photo}')"
+            >`
+          : ""
+      }
+    `);
+
+
+
+
+    marker.on("contextmenu",function(e){
+      e.originalEvent.stopPropagation();
+      showMarkerMenu(e.originalEvent.pageX,e.originalEvent.pageY,m.id);
+    });
+  });
+
+  renderSidebar();
+}
+
+renderMarkers();
+
+/* MENU DIREITO MAPA */
+map.on("contextmenu",function(e){
+  currentCoords={x:Math.round(e.latlng.lat),y:Math.round(e.latlng.lng)};
+  showMapMenu(e.originalEvent.pageX,e.originalEvent.pageY);
+});
+
+function showMapMenu(x,y){
+  const menu=document.getElementById("contextMenu");
+  menu.innerHTML="➕ Adicionar CDS";
+  menu.style.left=x+"px";
+  menu.style.top=y+"px";
+  menu.onclick=function(){
+    requestPassword("add");
+  };
+
+  menu.classList.remove("hidden");
+}
+
+function showMarkerMenu(x,y,id){
+  const menu=document.getElementById("contextMenu");
+
+  menu.innerHTML=`
+    <div id="editBtn" style="padding:4px 0;">✏️ Editar</div>
+    <div id="deleteBtn" style="padding:4px 0;">🗑️ Deletar</div>
+  `;
+
+  menu.style.left=x+"px";
+  menu.style.top=y+"px";
+  menu.classList.remove("hidden");
+
+  document.getElementById("editBtn").onclick=function(e){
+    e.stopPropagation();
+    menu.classList.add("hidden");
+    requestPassword("edit", id);
+  };
+
+  document.getElementById("deleteBtn").onclick=function(e){
+    e.stopPropagation();
+    menu.classList.add("hidden");
+    requestPassword("delete", id);
+  };
+}
+
+function openImage(src){
+  const modal = document.getElementById("imageModal");
+  const img = document.getElementById("modalImage");
+
+  img.src = src;
+  modal.classList.remove("hidden");
+}
+
+// fechar clicando fora
+document.getElementById("imageModal").addEventListener("click", function(e){
+  if(e.target.id === "imageModal"){
+    this.classList.add("hidden");
+  }
+});
+
+let pendingAction = null;
+
+function requestPassword(action,id=null){
+  pendingAction = { action, id };
+  document.getElementById("passwordInput").value="";
+  document.getElementById("passMsg").innerText="";
+  document.getElementById("passwordModal").classList.remove("hidden");
+}
+
+
+document.addEventListener("click",()=>{
+  document.getElementById("contextMenu").classList.add("hidden");
+});
+
+/* SENHA */
+function checkPassword(){
+  const val=document.getElementById("passwordInput").value;
+
+  if(val!==PASSWORD){
+    document.getElementById("passMsg").innerText="Senha incorreta.";
+    return;
+  }
+
+  document.getElementById("passwordModal").classList.add("hidden");
+
+  if(!pendingAction) return;
+
+  if(pendingAction.action==="add"){
+    editingId=null;
+    openEditPanel();
+  }
+
+  if(pendingAction.action==="edit"){
+    editingId=pendingAction.id;
+    openEditPanel(pendingAction.id);
+  }
+
+  if(pendingAction.action==="delete"){
+    markers = markers.filter(m => m.id !== pendingAction.id);
+    saveStorage();
+    renderMarkers();
+  }
+
+  pendingAction=null;
+}
+
+
+function openEditPanel(id=null){
+  document.getElementById("panelModal").classList.remove("hidden");
+
+  if(id){
+    const m=markers.find(x=>x.id===id);
+    document.getElementById("name").value=m.name;
+    document.getElementById("desc").value=m.desc;
+    document.getElementById("photo").value=m.photo;
+    document.getElementById("icon").value=m.icon;
+    currentCoords={x:m.x,y:m.y};
+  }
+
+  document.getElementById("coordsPreview").innerText=
+    `X: ${currentCoords.x} | Y: ${currentCoords.y}`;
+}
+
+/* SALVAR */
+function saveMarker(){
+  const data={
+    id:editingId || Date.now(),
+    name:document.getElementById("name").value,
+    desc:document.getElementById("desc").value,
+    photo:document.getElementById("photo").value,
+    icon:document.getElementById("icon").value,
+    x:currentCoords.x,
+    y:currentCoords.y
+  };
+
+  if(editingId){
+    markers = markers.map(m => m.id === editingId ? data : m);
+  } else {
+    markers.push(data);
+  }
+
+  saveStorage();
+  editingId=null;
+  document.getElementById("panelModal").classList.add("hidden");
+  renderMarkers();
+}
+
+</script>
+
+</body>
+</html>
