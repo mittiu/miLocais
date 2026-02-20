@@ -117,7 +117,53 @@ button{
   margin-top:8px;
   cursor:pointer;
 }
+.img-modal{
+  position:fixed;
+  inset:0;
+  background:rgba(0,0,0,.85);
+  z-index:5000;
+  padding:16px;
 
+  /* 🔒 por padrão fica desligado */
+  display:none;
+  align-items:center;
+  justify-content:center;
+}
+
+/* quando abrir */
+.img-modal.show{
+  display:flex;
+}
+
+.img-wrap{
+  position:relative;
+  width:min(1100px, 96vw);
+  height:min(90vh, 900px);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+
+.img-full{
+  max-width:100%;
+  max-height:100%;
+  border-radius:14px;
+  box-shadow:0 18px 60px rgba(0,0,0,.6);
+}
+
+.img-close{
+  position:absolute;
+  top:-10px;
+  right:-10px;
+  width:36px;
+  height:36px;
+  border-radius:50%;
+  border:none;
+  background:#ff3b3b;
+  color:#fff;
+  font-weight:900;
+  cursor:pointer;
+}
 </style>
 </head>
 <body>
@@ -145,9 +191,11 @@ button{
   </div>
 </div>
   <!-- MODAL IMAGEM -->
-<div id="imageModal" class="modal hidden">
-  <div class="card" style="width:auto;max-width:90vw;background:transparent;border:none;">
-    <img id="modalImage" style="max-width:90vw;max-height:90vh;border-radius:12px;">
+<!-- MODAL IMAGEM GRANDE -->
+<div id="imageModal" class="img-modal">
+  <div class="img-wrap">
+    <button class="img-close" type="button" onclick="closeImage()">✕</button>
+    <img id="modalImage" class="img-full" alt="">
   </div>
 </div>
 
@@ -155,6 +203,8 @@ button{
 <div id="panelModal" class="modal hidden">
   <div class="card">
     <b>Adicionar Local</b>
+
+    <input type="hidden" id="editingId" value="">
 
     <input id="name" placeholder="Nome do local"/>
     <input id="desc" placeholder="Descrição"/>
@@ -184,120 +234,166 @@ button{
   </div>
 </div>
 
-<script>
-const PASSWORD = "1234";
-const STORAGE_KEY = "gta_markers";
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.9.0/firebase-app.js";
+import {
+  getFirestore, collection, addDoc, doc, updateDoc, deleteDoc,
+  onSnapshot
+} from "https://www.gstatic.com/firebasejs/12.9.0/firebase-firestore.js";
+import {
+  getAuth, signInWithEmailAndPassword, onAuthStateChanged
+} from "https://www.gstatic.com/firebasejs/12.9.0/firebase-auth.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyAiCGlKfd1Db9Td9wyMX6aSdMIv7gQrTmg",
+  authDomain: "milocs-25357.firebaseapp.com",
+  projectId: "milocs-25357",
+  storageBucket: "milocs-25357.firebasestorage.app",
+  messagingSenderId: "530932832038",
+  appId: "1:530932832038:web:daaaf3ddd7995d401793e7",
+  measurementId: "G-R59NDE15MK"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const auth = getAuth(app);
+
+const ADMIN_EMAIL = "luucas.amaral009@gmail.com";
 
 let currentCoords = null;
 let editingId = null;
+let markers = [];
+let leafletMarkers = new Map();
+let isAdmin = false;
+let pendingAction = null; // {type:'add'|'edit'|'delete', id}
 
+/* ================= MAP ================= */
 const map = L.map("map",{crs:L.CRS.Simple,minZoom:-2});
 const bounds=[[0,0],[2048,2048]];
 L.imageOverlay("map.png",bounds).addTo(map);
 map.fitBounds(bounds);
 
-let markers = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
-
-const iconList = {
-  red: "Vermelho",
-  blue: "Azul",
-  green: "Verde",
-  yellow: "Amarelo",
-  pink: "Rosa",
-  black: "Preto",
-  white: "Branco",
-};
-
+document.getElementById("map").addEventListener("contextmenu",(e)=>e.preventDefault());
 
 function getIcon(type){
   return L.icon({
     iconUrl: `icons/${type}.png`,
-    iconSize: [32, 32],
-    iconAnchor: [16, 32],
-    popupAnchor: [0, -30]
+    iconSize:[32,32],
+    iconAnchor:[16,32],
+    popupAnchor:[0,-30]
   });
 }
 
+/* ================= AUTH ================= */
+onAuthStateChanged(auth,(user)=>{
+  isAdmin = !!user;
+});
 
+window.checkPassword = async function(){
+  const pass = document.getElementById("passwordInput").value;
+  try{
+    await signInWithEmailAndPassword(auth, ADMIN_EMAIL, pass);
+    document.getElementById("passwordModal").classList.add("hidden");
+    document.getElementById("passMsg").innerText = "";
 
-function saveStorage(){
-  localStorage.setItem(STORAGE_KEY,JSON.stringify(markers));
+    if(pendingAction){
+      const act = pendingAction;
+      pendingAction = null;
+
+      if(act.type === "add"){
+        editingId = null;
+        openEditPanel(null);
+      } else if(act.type === "edit"){
+        editingId = act.id;
+        openEditPanel(act.id);
+      } else if(act.type === "delete"){
+        await deleteDoc(doc(db, "markers", act.id));
+      }
+    }
+  }catch(e){
+    document.getElementById("passMsg").innerText = "Senha incorreta.";
+  }
+};
+
+/* ================= FIRESTORE REALTIME ================= */
+onSnapshot(collection(db,"markers"),(snapshot)=>{
+  markers = snapshot.docs.map(doc=>({id:doc.id,...doc.data()}));
+  renderMarkers();
+});
+
+/* ================= RENDER ================= */
+function clearMarkers(){
+  leafletMarkers.forEach(m=>m.remove());
+  leafletMarkers.clear();
 }
 
+function renderMarkers(){
+  clearMarkers();
+
+  markers.forEach(m=>{
+    const marker=L.marker([m.x,m.y],{icon:getIcon(m.icon)}).addTo(map);
+
+    marker.bindTooltip(m.name,{direction:"top",offset:[0,-10]});
+
+    marker.bindPopup(`
+      <div class="p-title">${m.name}</div>
+      ${m.desc ? `<div class="p-desc">${m.desc}</div>`:""}
+      ${m.photo ? `<img class="p-img" src="${m.photo}" onclick="openImage('${m.photo}')">` : ""}
+    `);
+
+    marker.on("contextmenu",(e)=>{
+      e.originalEvent.preventDefault();
+      showMarkerMenu(e.originalEvent.pageX,e.originalEvent.pageY,m.id);
+    });
+
+    leafletMarkers.set(m.id,marker);
+  });
+
+  renderSidebar();
+}
+window.openImage = function(src){
+  const modal = document.getElementById("imageModal");
+  const img = document.getElementById("modalImage");
+  img.src = src;
+
+  modal.classList.add("show");
+};
+
+window.closeImage = function(){
+  const modal = document.getElementById("imageModal");
+  modal.classList.remove("show");
+};
+
+// fechar clicando fora da imagem
+document.getElementById("imageModal").addEventListener("click", (e) => {
+  if (e.target.id === "imageModal") closeImage();
+});
 function renderSidebar(){
   const sidebar=document.getElementById("sidebarList");
   sidebar.innerHTML="";
-
   markers.forEach(m=>{
     const div=document.createElement("div");
-
     div.style.padding="8px";
-    div.style.cursor="pointer";
     div.style.display="flex";
-    div.style.alignItems="center";
     div.style.gap="8px";
+    div.style.cursor="pointer";
 
     div.innerHTML=`
-      <img 
-        src="icons/${m.icon}.png" 
-        style="width:18px;height:18px;"
-      >
+      <img src="icons/${m.icon}.png" width="18">
       <span>${m.name}</span>
     `;
 
     div.onclick=()=>{
       map.setView([m.x,m.y],0);
+      leafletMarkers.get(m.id)?.openPopup();
     };
 
     sidebar.appendChild(div);
   });
 }
 
-
-function renderMarkers(){
-  map.eachLayer(layer=>{
-    if(layer instanceof L.Marker) map.removeLayer(layer);
-  });
-
-  markers.forEach(m=>{
-    const marker=L.marker([m.x,m.y],{icon:getIcon(m.icon)}).addTo(map);
-
-    marker.bindTooltip(m.name, {
-      direction: "top",
-      offset: [0, -10],
-      opacity: 0.9
-    });
-
-    marker.bindPopup(`
-      <div class="p-title">${m.name}</div>
-      ${m.desc ? `<div class="p-desc">${m.desc}</div>` : ""}
-      ${
-        m.photo
-          ? `<img
-              class="p-img"
-              src="${m.photo}"
-              onclick="openImage('${m.photo}')"
-            >`
-          : ""
-      }
-    `);
-
-
-
-
-    marker.on("contextmenu",function(e){
-      e.originalEvent.stopPropagation();
-      showMarkerMenu(e.originalEvent.pageX,e.originalEvent.pageY,m.id);
-    });
-  });
-
-  renderSidebar();
-}
-
-renderMarkers();
-
-/* MENU DIREITO MAPA */
-map.on("contextmenu",function(e){
+/* ================= MENU ================= */
+map.on("contextmenu",(e)=>{
   currentCoords={x:Math.round(e.latlng.lat),y:Math.round(e.latlng.lng)};
   showMapMenu(e.originalEvent.pageX,e.originalEvent.pageY);
 });
@@ -307,140 +403,119 @@ function showMapMenu(x,y){
   menu.innerHTML="➕ Adicionar CDS";
   menu.style.left=x+"px";
   menu.style.top=y+"px";
-  menu.onclick=function(){
-    requestPassword("add");
-  };
-
   menu.classList.remove("hidden");
+
+  menu.onclick=async ()=>{
+    menu.classList.add("hidden");
+    if(!isAdmin){
+      pendingAction = { type: "add", id: null };
+      document.getElementById("passwordModal").classList.remove("hidden");
+      return;
+    }
+    editingId = null;
+    openEditPanel(null);
+  };
 }
 
 function showMarkerMenu(x,y,id){
   const menu=document.getElementById("contextMenu");
-
   menu.innerHTML=`
-    <div id="editBtn" style="padding:4px 0;">✏️ Editar</div>
-    <div id="deleteBtn" style="padding:4px 0;">🗑️ Deletar</div>
+    <div id="editBtn">✏️ Editar</div>
+    <div id="deleteBtn">🗑️ Deletar</div>
   `;
-
   menu.style.left=x+"px";
   menu.style.top=y+"px";
   menu.classList.remove("hidden");
 
-  document.getElementById("editBtn").onclick=function(e){
-    e.stopPropagation();
+  document.getElementById("editBtn").onclick=()=>{
     menu.classList.add("hidden");
-    requestPassword("edit", id);
+    if(!isAdmin){
+      pendingAction = { type: "edit", id };
+      document.getElementById("passwordModal").classList.remove("hidden");
+      return;
+    }
+    editingId = id;
+    openEditPanel(id);
   };
 
-  document.getElementById("deleteBtn").onclick=function(e){
-    e.stopPropagation();
+  document.getElementById("deleteBtn").onclick=async ()=>{
     menu.classList.add("hidden");
-    requestPassword("delete", id);
+    if(!isAdmin){
+      pendingAction = { type: "delete", id };
+      document.getElementById("passwordModal").classList.remove("hidden");
+      return;
+    }
+    await deleteDoc(doc(db,"markers",id));
   };
 }
-
-function openImage(src){
-  const modal = document.getElementById("imageModal");
-  const img = document.getElementById("modalImage");
-
-  img.src = src;
-  modal.classList.remove("hidden");
-}
-
-// fechar clicando fora
-document.getElementById("imageModal").addEventListener("click", function(e){
-  if(e.target.id === "imageModal"){
-    this.classList.add("hidden");
-  }
-});
-
-let pendingAction = null;
-
-function requestPassword(action,id=null){
-  pendingAction = { action, id };
-  document.getElementById("passwordInput").value="";
-  document.getElementById("passMsg").innerText="";
-  document.getElementById("passwordModal").classList.remove("hidden");
-}
-
 
 document.addEventListener("click",()=>{
   document.getElementById("contextMenu").classList.add("hidden");
 });
 
-/* SENHA */
-function checkPassword(){
-  const val=document.getElementById("passwordInput").value;
-
-  if(val!==PASSWORD){
-    document.getElementById("passMsg").innerText="Senha incorreta.";
-    return;
-  }
-
-  document.getElementById("passwordModal").classList.add("hidden");
-
-  if(!pendingAction) return;
-
-  if(pendingAction.action==="add"){
-    editingId=null;
-    openEditPanel();
-  }
-
-  if(pendingAction.action==="edit"){
-    editingId=pendingAction.id;
-    openEditPanel(pendingAction.id);
-  }
-
-  if(pendingAction.action==="delete"){
-    markers = markers.filter(m => m.id !== pendingAction.id);
-    saveStorage();
-    renderMarkers();
-  }
-
-  pendingAction=null;
-}
-
-
+/* ================= PANEL ================= */
 function openEditPanel(id=null){
   document.getElementById("panelModal").classList.remove("hidden");
+  const hidden = document.getElementById("editingId");
 
   if(id){
-    const m=markers.find(x=>x.id===id);
-    document.getElementById("name").value=m.name;
-    document.getElementById("desc").value=m.desc;
-    document.getElementById("photo").value=m.photo;
-    document.getElementById("icon").value=m.icon;
-    currentCoords={x:m.x,y:m.y};
+    hidden.value = id;
+    // ✅ garante que salvar vai fazer update
+    editingId = id;
+
+    const m = markers.find(x => x.id === id);
+    if(!m) return;
+
+    document.getElementById("name").value  = m.name  || "";
+    document.getElementById("desc").value  = m.desc  || "";
+    document.getElementById("photo").value = m.photo || "";
+    document.getElementById("icon").value  = m.icon  || "red";
+
+    currentCoords = { x: m.x, y: m.y };
+  } else {
+    hidden.value = "";
+    // ✅ modo novo
+    editingId = null;
+    document.getElementById("name").value  = "";
+    document.getElementById("desc").value  = "";
+    document.getElementById("photo").value = "";
+    // currentCoords já vem do clique no mapa
   }
 
-  document.getElementById("coordsPreview").innerText=
+  document.getElementById("coordsPreview").innerText =
     `X: ${currentCoords.x} | Y: ${currentCoords.y}`;
 }
 
-/* SALVAR */
-function saveMarker(){
-  const data={
-    id:editingId || Date.now(),
-    name:document.getElementById("name").value,
-    desc:document.getElementById("desc").value,
-    photo:document.getElementById("photo").value,
-    icon:document.getElementById("icon").value,
-    x:currentCoords.x,
-    y:currentCoords.y
+window.closePanel=function(){
+  const hid = document.getElementById("editingId");
+  if(hid) hid.value = "";
+  document.getElementById("panelModal").classList.add("hidden");
+};
+
+window.saveMarker = async function(){
+  if(!isAdmin) return alert("Login admin necessário");
+
+  const id = (document.getElementById("editingId")?.value || "").trim() || null;
+
+  const data = {
+    name: document.getElementById("name").value.trim(),
+    desc: document.getElementById("desc").value.trim(),
+    photo: document.getElementById("photo").value.trim(),
+    icon: document.getElementById("icon").value,
+    x: currentCoords.x,
+    y: currentCoords.y
   };
 
-  if(editingId){
-    markers = markers.map(m => m.id === editingId ? data : m);
+  if(id){
+    await updateDoc(doc(db, "markers", id), data);
   } else {
-    markers.push(data);
+    await addDoc(collection(db, "markers"), data);
   }
 
-  saveStorage();
-  editingId=null;
+  document.getElementById("editingId").value = "";
   document.getElementById("panelModal").classList.add("hidden");
-  renderMarkers();
-}
-
+  editingId = null;
+};
 </script>
 
 </body>
